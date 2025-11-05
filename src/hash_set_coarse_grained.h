@@ -2,6 +2,9 @@
 #define HASH_SET_COARSE_GRAINED_H
 
 #include <cassert>
+#include <vector>
+#include <functional>
+#include <algorithm>
 
 #include "src/hash_set_base.h"
 
@@ -29,6 +32,10 @@ class HashSetCoarseGrained : public HashSetBase<T> {
     assert(false && "Not implemented yet");
     return 0u;
   }
+ private:
+  std::vector<std::vector<T>> table_;
+  size_t set_size_; //tracks the number of elements in the table
+  std::hash<T> hasher_;
 };
 
 #endif  // HASH_SET_COARSE_GRAINED_H
