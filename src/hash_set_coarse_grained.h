@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cassert>
 #include <functional>
+#include <mutex>
 #include <vector>
 
 #include "src/hash_set_base.h"
@@ -11,32 +12,37 @@
 template <typename T>
 class HashSetCoarseGrained : public HashSetBase<T> {
  public:
-  explicit HashSetSequential(const size_t capacity)
+  explicit HashSetCoarseGrained(const size_t capacity)
       : table_(capacity), set_size_(0) {
     assert(capacity > 0);
   }
 
   bool Add(T elem) final {
-    auto& bucket = Bucket_(elem);
+    {
+      // scope-lock for mutual exclusion
+      std::scoped_lock<std::mutex> lock(mutex_);
 
-    // 3) return false on duplicate (loops over the elements in that bucket)
-    if (std::find(bucket.begin(), bucket.end(), elem) != bucket.end()) {
-      return false;
-    }
+      auto& bucket = Bucket_(elem);
 
-    // 4) insert and update size if not present
-    bucket.push_back(std::move(elem));
-    set_size_++;
+      // 3) return false on duplicate (loops over the elements in that bucket)
+      if (std::find(bucket.begin(), bucket.end(), elem) != bucket.end()) {
+        return false;
+      }
+
+      // 4) insert and update size if not present
+      bucket.push_back(std::move(elem));
+      set_size_++;
+    }  // release lock
 
     // 5) apply resizing policy if needed
-    if (Policy_()) {
-      Resize_();
-    }
+    ResizeIfNeeded_();
     return true;
   }
 
   bool Remove(T elem) final {
-    // compute bucket index & find bucket
+    // scope-lock for mutual exclusion
+    std::scoped_lock<std::mutex> lock(mutex_);
+
     auto& bucket = Bucket_(elem);
 
     // find element position (returning early if doesn't exist)
@@ -50,6 +56,9 @@ class HashSetCoarseGrained : public HashSetBase<T> {
   }
 
   [[nodiscard]] bool Contains(T elem) final {
+    // scope-lock for mutual exclusion
+    std::scoped_lock<std::mutex> lock(mutex_);
+
     auto& bucket = Bucket_(elem);
 
     // return if found or not
@@ -57,12 +66,18 @@ class HashSetCoarseGrained : public HashSetBase<T> {
     return found;
   }
 
-  [[nodiscard]] size_t Size() const final { return set_size_; }
+  [[nodiscard]] size_t Size() const final {
+    // scope-lock for mutual exclusion
+    std::scoped_lock<std::mutex> lock(mutex_);
+
+    return set_size_;
+  }
 
  private:
   std::vector<std::vector<T>> table_;
   size_t set_size_;  // tracks the number of elements in the table
   std::hash<T> hasher_;
+  mutable std::mutex mutex_;
 
   /**
    * Returns the bucket associated with the element.
@@ -73,7 +88,13 @@ class HashSetCoarseGrained : public HashSetBase<T> {
 
   bool Policy_() { return set_size_ / table_.size() > 4; }
 
-  void Resize_() {
+  void ResizeIfNeeded_() {
+    // scope-lock for mutual exclusion
+    std::scoped_lock<std::mutex> lock(mutex_);
+
+    // check if need to resize
+    if (!Policy_()) return;
+
     // 1) create a new empty table with double the number of buckets
     std::vector<std::vector<T>> new_table(table_.size() * 2);
 
