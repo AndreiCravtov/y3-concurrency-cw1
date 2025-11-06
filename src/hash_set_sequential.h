@@ -60,7 +60,9 @@ class HashSetSequential : public HashSetBase<T> {
   [[nodiscard]] size_t Size() const final { return set_size_; }
 
  private:
-  std::vector<std::vector<T>> table_;
+  using table_t = std::vector<std::vector<T>>;
+
+  table_t table_;
   size_t set_size_;  // tracks the number of elements in the table
   std::hash<T> hasher_;
 
@@ -75,7 +77,7 @@ class HashSetSequential : public HashSetBase<T> {
 
   void Resize_() {
     // 1) create a new empty table with double the number of buckets
-    std::vector<std::vector<T>> new_table(table_.size() * 2);
+    table_t new_table(table_.size() * 2);
 
     // 2) move elements from the old table to the new one
     for (auto& bucket : table_) {

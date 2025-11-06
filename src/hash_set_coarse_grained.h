@@ -21,7 +21,7 @@ class HashSetCoarseGrained : public HashSetBase<T> {
   bool Add(T elem) final {
     {
       // scope-lock for mutual exclusion
-      std::scoped_lock<std::mutex> lock(mutex_);
+      scoped_mutex_t _(mutex_);
 
       auto& bucket = Bucket_(elem);
 
@@ -42,7 +42,7 @@ class HashSetCoarseGrained : public HashSetBase<T> {
 
   bool Remove(T elem) final {
     // scope-lock for mutual exclusion
-    std::scoped_lock<std::mutex> lock(mutex_);
+    scoped_mutex_t _(mutex_);
 
     auto& bucket = Bucket_(elem);
 
@@ -58,7 +58,7 @@ class HashSetCoarseGrained : public HashSetBase<T> {
 
   [[nodiscard]] bool Contains(T elem) final {
     // scope-lock for mutual exclusion
-    std::scoped_lock<std::mutex> lock(mutex_);
+    scoped_mutex_t _(mutex_);
 
     auto& bucket = Bucket_(elem);
 
@@ -70,7 +70,10 @@ class HashSetCoarseGrained : public HashSetBase<T> {
   [[nodiscard]] size_t Size() const final { return set_size_.load(); }
 
  private:
-  std::vector<std::vector<T>> table_;
+  using table_t = std::vector<std::vector<T>>;
+  using scoped_mutex_t = std::scoped_lock<std::mutex>;
+
+  table_t table_;
   std::atomic<size_t> table_size_;  // cached version of `table_.size()`
   std::atomic<size_t> set_size_;  // tracks the number of elements in the table
   std::hash<T> hasher_;
@@ -89,14 +92,14 @@ class HashSetCoarseGrained : public HashSetBase<T> {
     const size_t old_capacity = table_size_.load();
 
     // scope-lock for mutual exclusion
-    std::scoped_lock<std::mutex> lock(mutex_);
+    scoped_mutex_t _(mutex_);
 
     // if table size already increased, don't resize
     if (old_capacity != table_size_.load()) return;
 
     // 1) create a new empty table with double the number of buckets
     size_t new_capacity = old_capacity * 2;
-    std::vector<std::vector<T>> new_table(new_capacity);
+    table_t new_table(new_capacity);
 
     // 2) move elements from the old table to the new one
     for (auto& bucket : table_) {
