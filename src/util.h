@@ -6,6 +6,12 @@
 #include <cstddef>
 #include <type_traits>
 
+template <typename T1, typename T2>
+struct Pair {
+  T1 _1;
+  T2 _2;
+};
+
 class mutex_vector {
  public:
   explicit mutex_vector(const size_t capacity) : mutexes_(capacity) {}
