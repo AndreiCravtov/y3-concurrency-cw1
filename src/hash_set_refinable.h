@@ -8,9 +8,11 @@
 #include <iterator>
 #include <mutex>
 #include <ranges>
+#include <thread>
 #include <vector>
 
 #include "src/hash_set_base.h"
+#include "src/util.h"
 
 template <typename T>
 class HashSetRefinable : public HashSetBase<T> {
@@ -80,6 +82,7 @@ class HashSetRefinable : public HashSetBase<T> {
   std::atomic<size_t> set_size_;  // tracks the number of elements in the table
   std::hash<T> hasher_;
   mutable std::vector<std::mutex> mutexes_;
+  atomic_markable_ptr<std::thread::id> owner_;
 
   /**
    * Returns the mutex associated with the element.

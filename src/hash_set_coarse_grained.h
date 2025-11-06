@@ -74,7 +74,7 @@ class HashSetCoarseGrained : public HashSetBase<T> {
   std::atomic<size_t> table_size_;  // cached version of `table_.size()`
   std::atomic<size_t> set_size_;  // tracks the number of elements in the table
   std::hash<T> hasher_;
-  mutable std::mutex mutex_;
+  std::mutex mutex_;
 
   /**
    * Returns the bucket associated with the element.
