@@ -16,7 +16,7 @@ public:
     : table_(capacity),
       table_size_(capacity),
       size_(0),
-      locks_(capacity),
+      mutexes_(capacity),
       owner_(nullptr) {
     assert(capacity > 0);
   }
@@ -48,7 +48,7 @@ private:
   std::vector<std::vector<T>> table_;
   std::atomic<size_t> table_size_;
   std::atomic<size_t> size_;
-  std::vector<std::unique_lock<std::mutex>> locks_;
+  std::vector<std::mutex> mutexes_;
   std::hash<T> hasher_;
 
   /**
@@ -68,7 +68,8 @@ private:
    * Returns the lock associated with the element
    */
   std::unique_lock<std::mutex> Lock_(T elem) {
-    return locks_[hasher_(elem) % table_size_.load()];
+    auto mutex = mutexes_[hasher_(elem) % table_size_.load()];
+    return std::unique_lock<std::mutex>(mutex);
   }
 
   /**
@@ -109,18 +110,37 @@ private:
    * Waits for all locks to be unlocked
    */
   void Quiesce_() {
-    for (auto lock : locks_) {
-      lock.lock();
-      lock.unlock();
+    for (auto& mutex : mutexes_) {
+      std::scoped_lock<std::mutex> lock(mutex);
     }
   }
 
-  /**
-   * Resizes the table
-   */
+  bool Policy_() {
+    return size_ / table_size_.load() > 4; // average size > 4
+  }
 
+  /**
+   * Doubles the table size
+   */
   void Resize_() {
-    // TODO
+    size_t old_table_size = table_size_.load();
+    size_t new_table_size = old_table_size * 2;
+    bool mark = true;
+    std::thread::id me = std::this_thread::get_id();
+
+    if (owner_.CompareAndSet(nullptr, &me, false, true)) {
+      if (table_size_.load() != old_table_size) { // someone already resized, just return
+        owner_.Set(nullptr, false);
+        return;
+      }
+
+      Quiesce_();
+
+      std::vector<std::vector<T>> old_table = table_;
+      table_ = std::vector<std::vector<T>>(new_table_size);
+
+      mutexes_ = std::vector<std::mutex>(new_table_size);
+    }
   }
 };
 
