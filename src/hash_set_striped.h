@@ -11,7 +11,29 @@
 #include <vector>
 
 #include "src/hash_set_base.h"
-#include "util.h"
+
+class mutex_vector {
+ public:
+  explicit mutex_vector(const size_t capacity) : mutexes_(capacity) {}
+
+  void lock() {
+    for (auto& m : mutexes_) {
+      m.lock();
+    }
+  }
+
+  void unlock() {
+    // unlock in reverse order
+    for (auto& m : std::ranges::reverse_view(mutexes_)) {
+      m.unlock();
+    }
+  }
+
+  std::vector<std::mutex>& as_ref() & { return mutexes_; }
+
+ private:
+  std::vector<std::mutex> mutexes_;
+};
 
 template <typename T>
 class HashSetStriped : public HashSetBase<T> {

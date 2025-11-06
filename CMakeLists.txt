@@ -48,13 +48,12 @@ target_include_directories(checks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 function(add_hash_set_demo name)
     add_executable(demo_${name}
             src/benchmark.h
-            src/util.h
             src/hash_set_base.h
             src/hash_set_${name}.h
             src/benchmark.cc
             src/demo_${name}.cc)
     target_include_directories(demo_${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(demo_${name} PRIVATE Threads::Threads atomic)
+    target_link_libraries(demo_${name} PRIVATE Threads::Threads)
 endfunction()
 
 add_hash_set_demo(sequential)
@@ -63,7 +62,6 @@ add_hash_set_demo(striped)
 add_hash_set_demo(refinable)
 
 add_executable(playground
-        src/util.h
         src/hash_set_base.h
         src/hash_set_coarse_grained.h
         src/hash_set_refinable.h
@@ -71,4 +69,4 @@ add_executable(playground
         src/hash_set_striped.h
         src/playground.cc)
 target_include_directories(playground PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(playground PRIVATE Threads::Threads atomic)
+target_link_libraries(playground PRIVATE Threads::Threads)

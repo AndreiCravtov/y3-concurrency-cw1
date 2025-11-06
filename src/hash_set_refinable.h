@@ -5,14 +5,15 @@
 #include <atomic>
 #include <cassert>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <ranges>
+#include <shared_mutex>
 #include <thread>
 #include <variant>
 #include <vector>
 
 #include "src/hash_set_base.h"
-#include "src/util.h"
 
 template <typename T>
 class HashSetRefinable : public HashSetBase<T> {
@@ -22,7 +23,7 @@ class HashSetRefinable : public HashSetBase<T> {
         table_size_(capacity),
         set_size_(0),
         mutexes_(capacity),
-        owner_(std::nullopt) {
+        resizing_(false) {
     assert(capacity > 0);
   }
 
@@ -83,14 +84,14 @@ class HashSetRefinable : public HashSetBase<T> {
 
  private:
   using table_t = std::vector<std::vector<T>>;
-  using owner_t = std::optional<std::thread::id>;
 
   table_t table_;
   std::atomic<size_t> table_size_;  // cached version of `table_.size()`
   std::atomic<size_t> set_size_;  // tracks the number of elements in the table
   std::hash<T> hasher_;
   std::vector<std::mutex> mutexes_;
-  std::atomic<owner_t> owner_;  // which thread is resizing
+  std::shared_mutex resize_mutex_;
+  std::atomic<bool> resizing_;  // are we resizing or not
 
   /**
    * Returns the bucket associated with the element.
@@ -99,43 +100,43 @@ class HashSetRefinable : public HashSetBase<T> {
     return table_[hasher_(elem) % table_size_.load()];
   }
 
+  /**
+   * Returns the lock associated with the element.
+   */
+  auto& Mutex_(T elem) { return mutexes_[hasher_(elem) % mutexes_.size()]; }
+
   void Acquire_(T elem) {
-    const auto me = std::this_thread::get_id();
-    owner_t who;
+    // don't try to acquire while resizing (heuristic)
+    do {
+    } while (resizing_.load());
 
-    while (true) {
-      do {
-        who = owner_.load();
-      } while (who.has_value() && who.value() != me);
-
-      auto* old_locks = &mutexes_;
-      auto& old_lock = old_locks->at(hasher_(elem) % old_locks->size());
-      old_lock.lock();
-
-      who = owner_.load();
-      if ((!who.has_value() || who.value() == me) && &mutexes_ == old_locks) {
-        return;
-      } else {
-        old_lock.unlock();
-      }
-    }
+    // acquire shared resize lock first, then the specific lock
+    resize_mutex_.lock_shared();
+    Mutex_(elem).lock();
   }
 
-  void Release_(T elem) { mutexes_[hasher_(elem) % mutexes_.size()].unlock(); }
+  void Release_(T elem) {
+    // release in reverse order
+    Mutex_(elem).unlock();
+    resize_mutex_.unlock_shared();
+  }
 
-  bool Policy_() const { return set_size_.load() / table_size_.load() > 4; }
+  [[nodiscard]] bool Policy_() const {
+    return set_size_.load() / table_size_.load() > 4;
+  }
 
   void Resize_() {
     const size_t old_capacity = table_size_.load();
-    // bool mark = false; // HUH??
     size_t new_capacity = old_capacity * 2;
 
-    const owner_t me = std::this_thread::get_id();
-    owner_t nullopt = std::nullopt;
-    if (owner_.compare_exchange_strong(nullopt, me)) {
+    if (auto _false = false; resizing_.compare_exchange_strong(_false, true)) {
+      // acquire exclusive resize lock -> no other thread can do anything now
+      resize_mutex_.lock();
+
       // someone else resized first -> no longer resizing
       if (old_capacity != table_size_.load()) {
-        owner_.store(nullopt);
+        resizing_.store(false);
+        resize_mutex_.unlock();
         return;
       }
 
@@ -157,7 +158,8 @@ class HashSetRefinable : public HashSetBase<T> {
       table_ = std::move(new_table);
       table_size_.store(new_capacity);
 
-      owner_.store(nullopt);  // no longer resizing
+      resizing_.store(false);  // no longer resizing
+      resize_mutex_.unlock();
     }
   }
 
