@@ -1,131 +1,126 @@
 #ifndef HASH_SET_REFINABLE_H
 #define HASH_SET_REFINABLE_H
 
-#include <algorithm>
-#include <atomic>
 #include <cassert>
-#include <functional>
-#include <iterator>
 #include <mutex>
-#include <ranges>
 #include <thread>
 #include <vector>
 
 #include "src/hash_set_base.h"
-#include "src/util.h"
+#include "util.h"
 
 template <typename T>
 class HashSetRefinable : public HashSetBase<T> {
- public:
+public:
   explicit HashSetRefinable(const size_t capacity)
-      : table_(capacity),
-        table_size_(capacity),
-        set_size_(0),
-        mutexes_(capacity) {
+    : table_(capacity),
+      table_size_(capacity),
+      size_(0),
+      locks_(capacity),
+      owner_(nullptr) {
     assert(capacity > 0);
   }
 
   bool Add(T elem) final {
-    {
-      // scope-lock for mutual exclusion
-      scoped_mutex_t _(Mutex_(elem));
+    std::vector<T> bucket = Bucket_(elem);
+    std::unique_lock<std::mutex> lock = Lock_(elem);
 
-      auto& bucket = Bucket_(elem);
 
-      // 3) return false on duplicate (loops over the elements in that bucket)
-      if (std::find(bucket.begin(), bucket.end(), elem) != bucket.end()) {
-        return false;
-      }
-
-      // 4) insert and update size if not present
-      bucket.push_back(std::move(elem));
-      set_size_.fetch_add(1);
-    }  // release lock
-
-    // 5) apply resizing policy if needed
-    if (Policy_()) Resize_();
-    return true;
+    return false;
   }
 
-  bool Remove(T elem) final {
-    // scope-lock for mutual exclusion
-    scoped_mutex_t _(Mutex_(elem));
-
-    auto& bucket = Bucket_(elem);
-
-    // find element position (returning early if doesn't exist)
-    auto i = std::find(bucket.begin(), bucket.end(), elem);
-    if (i == bucket.end()) return false;
-
-    // remove element & decrement size
-    bucket.erase(i);
-    set_size_.fetch_sub(1);
-    return true;
+  bool Remove(T /*elem*/) final {
+    assert(false && "Not implemented yet");
+    return false;
   }
 
-  [[nodiscard]] bool Contains(T elem) final {
-    // scope-lock for mutual exclusion
-    scoped_mutex_t _(Mutex_(elem));
-
-    auto& bucket = Bucket_(elem);
-
-    // return if found or not
-    auto found = std::find(bucket.begin(), bucket.end(), elem) != bucket.end();
-    return found;
+  [[nodiscard]] bool Contains(T /*elem*/) final {
+    assert(false && "Not implemented yet");
+    return false;
   }
 
-  [[nodiscard]] size_t Size() const final { return set_size_.load(); }
+  [[nodiscard]] size_t Size() const final {
+    assert(false && "Not implemented yet");
+    return 0u;
+  }
 
- private:
-  using table_t = std::vector<std::vector<T>>;
-  using scoped_mutex_t = std::scoped_lock<std::mutex>;
-
-  table_t table_;
-  std::atomic<size_t> table_size_;  // cached version of `table_.size()`
-  std::atomic<size_t> set_size_;  // tracks the number of elements in the table
+private:
+  std::vector<std::vector<T>> table_;
+  std::atomic<size_t> table_size_;
+  std::atomic<size_t> size_;
+  std::vector<std::unique_lock<std::mutex>> locks_;
   std::hash<T> hasher_;
-  mutex_vector mutexes_;
-  AtomicMarkablePtr<std::thread::id> owner_;  // which thread is resizing
 
   /**
-   * Returns the mutex associated with the element.
+   * Contains Ptr to std::thread::id of the thread that owns lock
+   * False - no one uses, True - someone is using Hashset
    */
-  std::mutex& Mutex_(T elem) {
-    auto& mutexes = mutexes_.as_ref();
-    return mutexes[hasher_(elem) % mutexes.size()];
-  }
+  AtomicMarkablePtr<std::thread::id> owner_;
 
   /**
-   * Returns the bucket associated with the element.
+   * Returns the bucket associated with the element
    */
   std::vector<T>& Bucket_(T elem) {
     return table_[hasher_(elem) % table_size_.load()];
   }
 
-  bool Policy_() const { return set_size_.load() / table_size_.load() > 4; }
+  /**
+   * Returns the lock associated with the element
+   */
+  std::unique_lock<std::mutex> Lock_(T elem) {
+    return locks_[hasher_(elem) % table_size_.load()];
+  }
+
+  /**
+   * Acquires corresponding to the item lock
+   * 1) Spins until no other thread is resizing the set
+   * 2) Reads the lock array
+   * 3) Acquires lock and checks again (1)
+   */
+  void Acquire_(T elem) {
+    std::thread::id me = std::this_thread::get_id();
+    std::thread::id* who;
+    bool mark = true;
+    while (true) {
+      do {
+        who = owner_.Get(mark);
+      } while (mark && *who != me);
+
+      std::unique_lock<std::mutex> old_lock = Lock_(elem);
+      old_lock.lock();
+
+      who = owner_.Get(mark);
+
+      if ((!mark || *who != me) /* && old_locks == locks_ */) {
+        return;
+      }
+      old_lock.unlock();
+    }
+  }
+
+  /**
+   * Releases corresponding to the item lock
+   */
+  void Release_(T elem) {
+    Lock_(elem).unlock();
+  }
+
+  /**
+   * Waits for all locks to be unlocked
+   */
+  void Quiesce_() {
+    for (auto lock : locks_) {
+      lock.lock();
+      lock.unlock();
+    }
+  }
+
+  /**
+   * Resizes the table
+   */
 
   void Resize_() {
-    const size_t old_capacity = table_size_.load();
-
-    // acquire all locks & if table size already increased, don't resize
-    std::scoped_lock<mutex_vector> _(mutexes_);
-    if (old_capacity != table_size_.load()) return;
-
-    // 1) create a new empty table with double the number of buckets
-    size_t new_capacity = old_capacity * 2;
-    table_t new_table(new_capacity);
-
-    // 2) move elements from the old table to the new one
-    for (auto& bucket : table_) {
-      for (auto& elem : bucket) {
-        size_t i = hasher_(elem) % new_table.size();
-        new_table[i].push_back(std::move(elem));
-      }
-    }
-
-    // 3) replace old table with new one
-    table_ = std::move(new_table);
-    table_size_.store(new_capacity);
+    // TODO
   }
 };
 
