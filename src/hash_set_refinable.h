@@ -129,13 +129,12 @@ class HashSetRefinable : public HashSetBase<T> {
     // bool mark = false; // HUH??
     size_t new_capacity = old_capacity * 2;
 
-    auto me = static_cast<std::thread::id*>(malloc(sizeof(std::thread::id)));
-    *me = std::this_thread::get_id();
-    if (owner_.CompareAndSet(nullptr, me, false, true)) {
-      // someone else resized first
+    const auto me =
+        std::make_unique<std::thread::id>(std::this_thread::get_id());
+    if (owner_.CompareAndSet(nullptr, me.get(), false, true)) {
+      // someone else resized first -> no longer resizing
       if (old_capacity != table_size_.load()) {
-        owner_.Set(nullptr, false);  // no longer resizing
-        free(me);                    // free the 'me'-memory
+        owner_.Set(nullptr, false);
         return;
       }
 
@@ -159,8 +158,6 @@ class HashSetRefinable : public HashSetBase<T> {
 
       owner_.Set(nullptr, false);  // no longer resizing
     }
-    // free the 'me'-memory
-    free(me);
   }
 
   void Quiesce_() {
