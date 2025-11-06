@@ -93,19 +93,19 @@ class HashSetRefinable : public HashSetBase<T> {
   void Acquire_(T elem) {
     bool mark = true;
     const auto me = std::this_thread::get_id();
-    std::thread::id who;
+    std::thread::id* who;
 
     while (true) {
       do {
-        who = *owner_.Get(mark);
-      } while (mark && who != me);
+        who = owner_.Get(mark);
+      } while (mark && (who == nullptr || *who != me));
 
       auto* old_locks = &mutexes_;
       auto& old_lock = old_locks->at(hasher_(elem) % old_locks->size());
       old_lock.lock();
 
-      who = *owner_.Get(mark);
-      if ((!mark || who == me) && &mutexes_ == old_locks) {
+      who = owner_.Get(mark);
+      if ((!mark || (who != nullptr && *who == me)) && &mutexes_ == old_locks) {
         return;
       } else {
         old_lock.unlock();
