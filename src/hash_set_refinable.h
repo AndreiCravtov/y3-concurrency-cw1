@@ -90,6 +90,13 @@ class HashSetRefinable : public HashSetBase<T> {
   std::vector<std::mutex> mutexes_;
   AtomicMarkablePtr<std::thread::id> owner_;  // which thread is resizing
 
+  /**
+   * Returns the bucket associated with the element.
+   */
+  std::vector<T>& Bucket_(T elem) {
+    return table_[hasher_(elem) % table_size_.load()];
+  }
+
   void Acquire_(T elem) {
     bool mark = true;
     const auto me = std::this_thread::get_id();
@@ -114,13 +121,6 @@ class HashSetRefinable : public HashSetBase<T> {
   }
 
   void Release_(T elem) { mutexes_[hasher_(elem) % mutexes_.size()].unlock(); }
-
-  /**
-   * Returns the bucket associated with the element.
-   */
-  std::vector<T>& Bucket_(T elem) {
-    return table_[hasher_(elem) % table_size_.load()];
-  }
 
   bool Policy_() const { return set_size_.load() / table_size_.load() > 4; }
 
