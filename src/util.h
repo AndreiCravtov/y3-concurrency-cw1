@@ -4,10 +4,11 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <thread>
 #include <type_traits>
 
 template <typename T1, typename T2>
-struct Pair {
+struct pair {
   T1 _1;
   T2 _2;
 };
@@ -33,6 +34,42 @@ class mutex_vector {
 
  private:
   std::vector<std::mutex> mutexes_;
+};
+
+template <typename T>
+class AtomicMarkableValue {
+ public:
+  AtomicMarkableValue(T initial_value, const bool initial_mark)
+      : marked_value_(MarkedValue_(initial_value, initial_mark)) {}
+
+  T GetValue() { return marked_value_.load()._1; }
+
+  bool IsMarked() const { return marked_value_.load()._2; }
+
+  T Get(bool& mark_holder) {
+    const auto marked_value = marked_value_.load();
+
+    mark_holder = marked_value._2;
+    return marked_value._1;
+  }
+
+  bool CompareAndSet(T expected_value, T new_value, const bool expected_mark,
+                     const bool new_mark) {
+    auto expected_marked_value = MarkedValue_(expected_value, expected_mark);
+    return marked_value_.compare_exchange_strong(
+        expected_marked_value, MarkedValue_(new_value, new_mark));
+  }
+
+  void Set(T new_value, const bool new_mark) {
+    marked_value_.store(MarkedValue_(new_value, new_mark));
+  }
+
+ private:
+  std::atomic<pair<T, bool>> marked_value_;
+
+  [[nodiscard]] static pair<T, bool> MarkedValue_(T value, const bool mark) {
+    return pair{._1 = value, ._2 = mark};
+  }
 };
 
 /**

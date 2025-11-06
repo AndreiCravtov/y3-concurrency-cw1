@@ -54,7 +54,7 @@ function(add_hash_set_demo name)
             src/benchmark.cc
             src/demo_${name}.cc)
     target_include_directories(demo_${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(demo_${name} PRIVATE Threads::Threads)
+    target_link_libraries(demo_${name} PRIVATE Threads::Threads atomic)
 endfunction()
 
 add_hash_set_demo(sequential)
@@ -71,4 +71,4 @@ add_executable(playground
         src/hash_set_striped.h
         src/playground.cc)
 target_include_directories(playground PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(playground PRIVATE Threads::Threads)
+target_link_libraries(playground PRIVATE Threads::Threads atomic)

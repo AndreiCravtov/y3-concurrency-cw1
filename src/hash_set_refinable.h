@@ -21,7 +21,8 @@ class HashSetRefinable : public HashSetBase<T> {
       : table_(capacity),
         table_size_(capacity),
         set_size_(0),
-        mutexes_(capacity) {
+        mutexes_(capacity),
+        owner_(std::nullopt, false) {
     assert(capacity > 0);
   }
 
@@ -82,13 +83,14 @@ class HashSetRefinable : public HashSetBase<T> {
 
  private:
   using table_t = std::vector<std::vector<T>>;
+  using owner_t = std::optional<std::thread::id>;
 
   table_t table_;
   std::atomic<size_t> table_size_;  // cached version of `table_.size()`
   std::atomic<size_t> set_size_;  // tracks the number of elements in the table
   std::hash<T> hasher_;
   std::vector<std::mutex> mutexes_;
-  AtomicMarkablePtr<std::thread::id> owner_;  // which thread is resizing
+  AtomicMarkableValue<owner_t> owner_;  // which thread is resizing
 
   /**
    * Returns the bucket associated with the element.
@@ -99,20 +101,20 @@ class HashSetRefinable : public HashSetBase<T> {
 
   void Acquire_(T elem) {
     bool mark = true;
-    const auto me = std::this_thread::get_id();
-    std::thread::id* who;
+    const owner_t me = std::this_thread::get_id();
+    owner_t who;
 
     while (true) {
       do {
         who = owner_.Get(mark);
-      } while (mark && (who == nullptr || *who != me));
+      } while (mark && who != me);
 
       auto* old_locks = &mutexes_;
       auto& old_lock = old_locks->at(hasher_(elem) % old_locks->size());
       old_lock.lock();
 
       who = owner_.Get(mark);
-      if ((!mark || (who != nullptr && *who == me)) && &mutexes_ == old_locks) {
+      if ((!mark || who == me) && &mutexes_ == old_locks) {
         return;
       } else {
         old_lock.unlock();
@@ -129,14 +131,11 @@ class HashSetRefinable : public HashSetBase<T> {
     // bool mark = false; // HUH??
     size_t new_capacity = old_capacity * 2;
 
-    const auto me =
-        static_cast<std::thread::id*>(malloc(sizeof(std::thread::id)));
-    *me = std::this_thread::get_id();
-    if (owner_.CompareAndSet(nullptr, me, false, true)) {
-      // someone else resized first
+    const owner_t me = std::this_thread::get_id();
+    if (owner_.CompareAndSet(std::nullopt, me, false, true)) {
+      // someone else resized first -> no longer resizing
       if (old_capacity != table_size_.load()) {
-        owner_.Set(nullptr, false);  // no longer resizing
-        free(me);                    // free the 'me'-memory
+        owner_.Set(std::nullopt, false);
         return;
       }
 
@@ -158,10 +157,8 @@ class HashSetRefinable : public HashSetBase<T> {
       table_ = std::move(new_table);
       table_size_.store(new_capacity);
 
-      owner_.Set(nullptr, false);  // no longer resizing
+      owner_.Set(std::nullopt, false);  // no longer resizing
     }
-    // free the 'me'-memory
-    free(me);
   }
 
   void Quiesce_() {
