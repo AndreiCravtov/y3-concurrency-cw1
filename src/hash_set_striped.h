@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "src/hash_set_base.h"
+#include "util.h"
 
 template <typename T>
 class HashSetStriped : public HashSetBase<T> {
@@ -82,13 +83,14 @@ class HashSetStriped : public HashSetBase<T> {
   std::atomic<size_t> table_size_;  // cached version of `table_.size()`
   std::atomic<size_t> set_size_;  // tracks the number of elements in the table
   std::hash<T> hasher_;
-  mutable std::vector<std::mutex> mutexes_;
+  mutex_vector mutexes_;
 
   /**
    * Returns the mutex associated with the element.
    */
   std::mutex& Mutex_(T elem) {
-    return mutexes_[hasher_(elem) % mutexes_.size()];
+    auto& mutexes = mutexes_.as_ref();
+    return mutexes[hasher_(elem) % mutexes.size()];
   }
 
   /**
@@ -98,30 +100,14 @@ class HashSetStriped : public HashSetBase<T> {
     return table_[hasher_(elem) % table_size_.load()];
   }
 
-  void AcquireAll_() const {
-    for (auto& m : mutexes_) {
-      m.lock();
-    }
-  }
-
-  void ReleaseAll_() const {
-    // iterate in reverse
-    for (auto& m : std::ranges::reverse_view(mutexes_)) {
-      m.unlock();
-    }
-  }
-
   bool Policy_() const { return set_size_.load() / table_size_.load() > 4; }
 
   void Resize_() {
     const size_t old_capacity = table_size_.load();
 
     // acquire all locks & if table size already increased, don't resize
-    AcquireAll_();
-    if (old_capacity != table_size_.load()) {
-      ReleaseAll_();
-      return;
-    }
+    std::scoped_lock<mutex_vector> _(mutexes_);
+    if (old_capacity != table_size_.load()) return;
 
     // 1) create a new empty table with double the number of buckets
     size_t new_capacity = old_capacity * 2;
@@ -138,9 +124,6 @@ class HashSetStriped : public HashSetBase<T> {
     // 3) replace old table with new one
     table_ = std::move(new_table);
     table_size_.store(new_capacity);
-
-    // release locks
-    ReleaseAll_();
   }
 };
 

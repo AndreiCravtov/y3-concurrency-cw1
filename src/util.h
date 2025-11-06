@@ -6,24 +6,47 @@
 #include <cstddef>
 #include <type_traits>
 
+class mutex_vector {
+ public:
+  explicit mutex_vector(size_t capacity) : mutexes_(capacity) {}
+
+  void lock() {
+    for (auto& m : mutexes_) {
+      m.lock();
+    }
+  }
+
+  void unlock() {
+    // unlock in reverse order
+    for (auto& m : std::ranges::reverse_view(mutexes_)) {
+      m.unlock();
+    }
+  }
+
+  std::vector<std::mutex>& as_ref() & { return mutexes_; }
+
+ private:
+  std::vector<std::mutex> mutexes_;
+};
+
 /**
- * An `atomic_markable_ptr` maintains an object pointer along with a mark
+ * An `AtomicMarkablePtr` maintains an object pointer along with a mark
  * bit, that can be updated atomically.
  *
  * @tparam T the type of object referred to by this pointer
  */
 template <typename T>
   requires(std::alignment_of_v<T> > 1)
-class atomic_markable_ptr {
+class AtomicMarkablePtr {
  public:
   /**
-   * Creates a new `atomic_markable_ptr` with the given initial values.
+   * Creates a new `AtomicMarkablePtr` with the given initial values.
    *
    * @param initial_ptr the initial pointer
    * @param initial_mark the initial mark
    */
-  explicit atomic_markable_ptr(T* initial_ptr = nullptr,
-                               const bool initial_mark = false)
+  explicit AtomicMarkablePtr(T* initial_ptr = nullptr,
+                             const bool initial_mark = false)
       : marked_ptr_(MarkedPtr_(initial_ptr, initial_mark)) {}
 
   /**
@@ -105,7 +128,7 @@ class atomic_markable_ptr {
 
   [[nodiscard]] static uintptr_t MarkedPtr_(T* ptr, const bool mark) {
     // last bit should be 0 because `alignment > 1`
-    const auto u_ptr = static_cast<uintptr_t>(ptr);
+    const auto u_ptr = reinterpret_cast<uintptr_t>(ptr);
     assert((u_ptr & ~mask_) == u_ptr);
 
     // use LSB to encode mark into pointer
@@ -113,7 +136,7 @@ class atomic_markable_ptr {
   }
 
   [[nodiscard]] static T* ExtractPtr_(const uintptr_t marked_ptr) {
-    return static_cast<T*>(marked_ptr & ~mask_);
+    return reinterpret_cast<T*>(marked_ptr & ~mask_);
   }
 
   [[nodiscard]] static bool ExtractMark_(const uintptr_t marked_ptr) {
