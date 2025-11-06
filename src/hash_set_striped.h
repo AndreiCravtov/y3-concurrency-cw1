@@ -7,6 +7,7 @@
 #include <functional>
 #include <iterator>
 #include <mutex>
+#include <ranges>
 #include <vector>
 
 #include "src/hash_set_base.h"
@@ -102,15 +103,15 @@ class HashSetStriped : public HashSetBase<T> {
 
   void ReleaseAll_() const {
     // iterate in reverse
-    for (auto it = mutexes_.rbegin(); it != mutexes_.rend(); ++it) {
-      it->unlock();
+    for (auto& m : std::ranges::reverse_view(mutexes_)) {
+      m.unlock();
     }
   }
 
   bool Policy_() const { return set_size_.load() / table_size_.load() > 4; }
 
   void Resize_() {
-    size_t old_capacity = table_size_.load();
+    const size_t old_capacity = table_size_.load();
 
     // acquire all locks & if table size already increased, don't resize
     AcquireAll_();

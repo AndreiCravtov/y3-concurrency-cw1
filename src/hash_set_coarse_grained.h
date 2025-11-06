@@ -86,7 +86,7 @@ class HashSetCoarseGrained : public HashSetBase<T> {
   bool Policy_() const { return set_size_.load() / table_size_.load() > 4; }
 
   void Resize_() {
-    size_t old_capacity = table_size_.load();
+    const size_t old_capacity = table_size_.load();
 
     // scope-lock for mutual exclusion
     std::scoped_lock<std::mutex> lock(mutex_);
