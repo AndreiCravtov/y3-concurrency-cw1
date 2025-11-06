@@ -101,20 +101,21 @@ class HashSetRefinable : public HashSetBase<T> {
 
   void Acquire_(T elem) {
     bool mark = true;
-    const owner_t me = std::this_thread::get_id();
+    const auto me = std::this_thread::get_id();
     owner_t who;
 
     while (true) {
       do {
         who = owner_.Get(mark);
-      } while (mark && who != me);
+      } while (mark && (!who.has_value() || who.value() != me));
 
       auto* old_locks = &mutexes_;
       auto& old_lock = old_locks->at(hasher_(elem) % old_locks->size());
       old_lock.lock();
 
       who = owner_.Get(mark);
-      if ((!mark || who == me) && &mutexes_ == old_locks) {
+      if ((!mark || (who.has_value() && who.value() == me)) &&
+          &mutexes_ == old_locks) {
         return;
       } else {
         old_lock.unlock();
@@ -131,7 +132,7 @@ class HashSetRefinable : public HashSetBase<T> {
     // bool mark = false; // HUH??
     size_t new_capacity = old_capacity * 2;
 
-    const owner_t me = std::this_thread::get_id();
+    const auto me = std::this_thread::get_id();
     if (owner_.CompareAndSet(std::nullopt, me, false, true)) {
       // someone else resized first -> no longer resizing
       if (old_capacity != table_size_.load()) {

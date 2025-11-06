@@ -42,12 +42,14 @@ class AtomicMarkableValue {
   AtomicMarkableValue(T initial_value, const bool initial_mark)
       : marked_value_(MarkedValue_(initial_value, initial_mark)) {}
 
-  T GetValue() { return marked_value_.load()._1; }
+  T GetValue() { return marked_value_.load(std::memory_order::seq_cst)._1; }
 
-  bool IsMarked() const { return marked_value_.load()._2; }
+  bool IsMarked() const {
+    return marked_value_.load(std::memory_order::seq_cst)._2;
+  }
 
   T Get(bool& mark_holder) {
-    const auto marked_value = marked_value_.load();
+    const auto marked_value = marked_value_.load(std::memory_order::seq_cst);
 
     mark_holder = marked_value._2;
     return marked_value._1;
@@ -57,11 +59,13 @@ class AtomicMarkableValue {
                      const bool new_mark) {
     auto expected_marked_value = MarkedValue_(expected_value, expected_mark);
     return marked_value_.compare_exchange_strong(
-        expected_marked_value, MarkedValue_(new_value, new_mark));
+        expected_marked_value, MarkedValue_(new_value, new_mark),
+        std::memory_order::seq_cst);
   }
 
   void Set(T new_value, const bool new_mark) {
-    marked_value_.store(MarkedValue_(new_value, new_mark));
+    marked_value_.store(MarkedValue_(new_value, new_mark),
+                        std::memory_order::seq_cst);
   }
 
  private:
