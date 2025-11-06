@@ -8,7 +8,7 @@
 
 class mutex_vector {
  public:
-  explicit mutex_vector(size_t capacity) : mutexes_(capacity) {}
+  explicit mutex_vector(const size_t capacity) : mutexes_(capacity) {}
 
   void lock() {
     for (auto& m : mutexes_) {
@@ -94,8 +94,9 @@ class AtomicMarkablePtr {
   [[nodiscard]] bool CompareAndSet(T* expected_ptr, T* new_ptr,
                                    const bool expected_mark,
                                    const bool new_mark) {
-    return marked_ptr_.compare_exchange_strong(
-        MarkedPtr_(expected_ptr, expected_mark), MarkedPtr_(new_ptr, new_mark));
+    auto expected_marked_ptr = MarkedPtr_(expected_ptr, expected_mark);
+    return marked_ptr_.compare_exchange_strong(expected_marked_ptr,
+                                               MarkedPtr_(new_ptr, new_mark));
   }
 
   /**
