@@ -1,6 +1,10 @@
 #ifndef HASH_SET_REFINABLE_H
 #define HASH_SET_REFINABLE_H
 
+#if defined(__i386__) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -15,6 +19,15 @@
 #include <vector>
 
 #include "src/hash_set_base.h"
+
+/**
+ * Spin waits, indicating to CPU that this is happening.
+ */
+static void busy_wait() {
+#if defined(__i386__) || defined(__x86_64__)
+  _mm_pause();
+#endif
+}
 
 template <typename T>
 class HashSetRefinable : public HashSetBase<T> {
@@ -91,7 +104,6 @@ class HashSetRefinable : public HashSetBase<T> {
   std::atomic<size_t> set_size_;  // tracks the number of elements in the table
   std::hash<T> hasher_;
   std::deque<std::mutex> mutexes_;
-  std::shared_mutex resize_mutex_;
   std::atomic<bool> resizing_;  // are we resizing or not
 
   /**
@@ -101,26 +113,28 @@ class HashSetRefinable : public HashSetBase<T> {
     return table_[hasher_(elem) % table_size_.load()];
   }
 
-  /**
-   * Returns the lock associated with the element.
-   */
-  auto& Mutex_(T elem) { return mutexes_[hasher_(elem) % mutexes_.size()]; }
-
   void Acquire_(T elem) {
-    // don't try to acquire while resizing (heuristic)
-    do {
-    } while (resizing_.load());
+    while (true) {
+      // someone else is resizing -> wait for it
+      do {
+        busy_wait();
+      } while (resizing_.load());
 
-    // acquire shared resize lock first, then the specific lock
-    resize_mutex_.lock_shared();
-    Mutex_(elem).lock();
+      // grab old value of mutex sizes & lock down
+      auto old_mutexes_size = mutexes_.size();
+      auto& mutex = mutexes_[hasher_(elem) % old_mutexes_size];
+      mutex.lock();
+
+      // haven't resized & not currently resizing -> succeed
+      if (!resizing_.load() && old_mutexes_size == mutexes_.size()) {
+        return;
+      } else {
+        mutex.unlock();
+      }
+    }
   }
 
-  void Release_(T elem) {
-    // release in reverse order
-    Mutex_(elem).unlock();
-    resize_mutex_.unlock_shared();
-  }
+  void Release_(T elem) { mutexes_[hasher_(elem) % mutexes_.size()].unlock(); }
 
   [[nodiscard]] bool Policy_() const {
     return set_size_.load() / table_size_.load() > 4;
@@ -131,18 +145,14 @@ class HashSetRefinable : public HashSetBase<T> {
     size_t new_capacity = old_capacity * 2;
 
     if (auto _false = false; resizing_.compare_exchange_strong(_false, true)) {
-      // acquire exclusive resize lock -> no other thread can do anything now
-      resize_mutex_.lock();
-
       // someone else resized first -> no longer resizing
       if (old_capacity != table_size_.load()) {
         resizing_.store(false);
-        resize_mutex_.unlock();
         return;
       }
 
-      // wait for all locks to be released & replace old locks with new ones
-      // Quiesce_();
+      // wait for all locks to be released & expand mutexes to new capacity
+      Quiesce_();
       mutexes_.resize(new_capacity);
 
       // create a new empty table with double the bucket count
@@ -160,7 +170,6 @@ class HashSetRefinable : public HashSetBase<T> {
       table_size_.store(new_capacity);
 
       resizing_.store(false);  // no longer resizing
-      resize_mutex_.unlock();
     }
   }
 
@@ -168,6 +177,7 @@ class HashSetRefinable : public HashSetBase<T> {
     for (auto& m : mutexes_) {
       {  // equivalent of `while (lock.isLocked()) {}` in Java
         while (!m.try_lock()) {
+          busy_wait();
         }
         m.unlock();
       }
