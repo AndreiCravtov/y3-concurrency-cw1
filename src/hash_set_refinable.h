@@ -11,40 +11,71 @@
 
 template <typename T>
 class HashSetRefinable : public HashSetBase<T> {
-public:
+ public:
   explicit HashSetRefinable(const size_t capacity)
-    : table_(capacity),
-      table_size_(capacity),
-      size_(0),
-      mutexes_(capacity),
-      owner_(nullptr) {
+      : table_(capacity),
+        table_size_(capacity),
+        size_(0),
+        mutexes_(capacity),
+        owner_(nullptr) {
     assert(capacity > 0);
   }
 
   bool Add(T elem) final {
+    // Acquire Lock
+    Acquire_(elem);
+
     std::vector<T> bucket = Bucket_(elem);
-    std::unique_lock<std::mutex> lock = Lock_(elem);
 
+    if (std::find(bucket.begin(), bucket.end(), elem) != bucket.end()) {
+      Release_(elem);
+      return false;
+    }
 
-    return false;
+    bucket.push_back(elem);
+    size_.fetch_add(1);
+
+    Release_(elem);
+    if (Policy_()) Resize_();
+    return true;
   }
 
-  bool Remove(T /*elem*/) final {
-    assert(false && "Not implemented yet");
-    return false;
+  bool Remove(T elem) final {
+    Acquire_(elem);
+
+    std::vector<T> bucket = Bucket_(elem);
+
+    // find element position (returning early if doesn't exist)
+    auto i = std::find(bucket.begin(), bucket.end(), elem);
+    if (i == bucket.end()) {
+      Release_(elem);
+      return false;
+    }
+
+    bucket.erase(i);
+    size_.fetch_sub(1);
+
+    Release_(elem);
+    return true;
   }
 
-  [[nodiscard]] bool Contains(T /*elem*/) final {
-    assert(false && "Not implemented yet");
-    return false;
+  [[nodiscard]] bool Contains(T elem) final {
+    Acquire_(elem);
+
+    std::vector<T> bucket = Bucket_(elem);
+
+    if (std::find(bucket.begin(), bucket.end(), elem) == bucket.end()) {
+      Release_(elem);
+      return false;
+    }
+
+    Release_(elem);
+    return true;
   }
 
-  [[nodiscard]] size_t Size() const final {
-    assert(false && "Not implemented yet");
-    return 0u;
-  }
+  [[nodiscard]] size_t Size() const final { return size_.load(); }
 
-private:
+ private:
   std::vector<std::vector<T>> table_;
   std::atomic<size_t> table_size_;
   std::atomic<size_t> size_;
@@ -68,7 +99,7 @@ private:
    * Returns the lock associated with the element
    */
   std::unique_lock<std::mutex> Lock_(T elem) {
-    auto mutex = mutexes_[hasher_(elem) % table_size_.load()];
+    auto& mutex = mutexes_[hasher_(elem) % table_size_.load()];
     return std::unique_lock<std::mutex>(mutex);
   }
 
@@ -102,9 +133,7 @@ private:
   /**
    * Releases corresponding to the item lock
    */
-  void Release_(T elem) {
-    Lock_(elem).unlock();
-  }
+  void Release_(T elem) { Lock_(elem).unlock(); }
 
   /**
    * Waits for all locks to be unlocked
@@ -116,7 +145,7 @@ private:
   }
 
   bool Policy_() {
-    return size_ / table_size_.load() > 4; // average size > 4
+    return size_ / table_size_.load() > 4;  // average size > 4
   }
 
   /**
@@ -125,11 +154,12 @@ private:
   void Resize_() {
     size_t old_table_size = table_size_.load();
     size_t new_table_size = old_table_size * 2;
-    bool mark = true;
+    // bool mark = false;
     std::thread::id me = std::this_thread::get_id();
 
     if (owner_.CompareAndSet(nullptr, &me, false, true)) {
-      if (table_size_.load() != old_table_size) { // someone already resized, just return
+      if (table_size_.load() !=
+          old_table_size) {  // someone already resized, just return
         owner_.Set(nullptr, false);
         return;
       }
@@ -140,7 +170,18 @@ private:
       table_ = std::vector<std::vector<T>>(new_table_size);
 
       mutexes_ = std::vector<std::mutex>(new_table_size);
+
+      for (auto& bucket : old_table) {
+        for (auto& elem : bucket) {
+          size_t i = hasher_(elem) % new_table_size;
+          table_[i].push_back(elem);
+        }
+      }
+
+      table_size_.store(new_table_size);
     }
+
+    owner_.Set(nullptr, false);
   }
 };
 

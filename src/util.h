@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <ranges>
 #include <type_traits>
 
 class mutex_vector {
@@ -18,7 +19,7 @@ class mutex_vector {
 
   void unlock() {
     // unlock in reverse order
-    for (auto& m : std::ranges::reverse_view(mutexes_)) {
+    for (auto& m : std::ranges::views::reverse(mutexes_)) {
       m.unlock();
     }
   }
@@ -94,8 +95,9 @@ class AtomicMarkablePtr {
   [[nodiscard]] bool CompareAndSet(T* expected_ptr, T* new_ptr,
                                    const bool expected_mark,
                                    const bool new_mark) {
-    return marked_ptr_.compare_exchange_strong(
-        MarkedPtr_(expected_ptr, expected_mark), MarkedPtr_(new_ptr, new_mark));
+    auto expected = MarkedPtr_(expected_ptr, expected_mark);
+    return marked_ptr_.compare_exchange_strong(expected,
+                                               MarkedPtr_(new_ptr, new_mark));
   }
 
   /**
