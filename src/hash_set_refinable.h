@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -89,7 +90,7 @@ class HashSetRefinable : public HashSetBase<T> {
   std::atomic<size_t> table_size_;  // cached version of `table_.size()`
   std::atomic<size_t> set_size_;  // tracks the number of elements in the table
   std::hash<T> hasher_;
-  std::vector<std::mutex> mutexes_;
+  std::deque<std::mutex> mutexes_;
   std::shared_mutex resize_mutex_;
   std::atomic<bool> resizing_;  // are we resizing or not
 
@@ -141,8 +142,8 @@ class HashSetRefinable : public HashSetBase<T> {
       }
 
       // wait for all locks to be released & replace old locks with new ones
-      Quiesce_();
-      mutexes_ = std::vector<std::mutex>(new_capacity);
+      // Quiesce_();
+      mutexes_.resize(new_capacity);
 
       // create a new empty table with double the bucket count
       // and rehash all elements into it from old table
