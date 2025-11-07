@@ -96,11 +96,10 @@ class HashSetRefinable : public HashSetBase<T> {
   }
 
   /**
-   * Returns the lock associated with the element
+   * Returns the mutex associated with the element's bucket
    */
-  std::unique_lock<std::mutex> Lock_(T elem) {
-    auto& mutex = mutexes_[hasher_(elem) % table_size_.load()];
-    return std::unique_lock<std::mutex>(mutex);
+  std::mutex& Mutex_(T elem) {
+    return mutexes_[hasher_(elem) % table_size_.load()];
   }
 
   /**
@@ -110,7 +109,7 @@ class HashSetRefinable : public HashSetBase<T> {
    * 3) Acquires lock and checks again (1)
    */
   void Acquire_(T elem) {
-    std::thread::id me = std::this_thread::get_id();
+    thread_local std::thread::id me = std::this_thread::get_id();
     std::thread::id* who;
     bool mark = true;
     while (true) {
@@ -118,22 +117,23 @@ class HashSetRefinable : public HashSetBase<T> {
         who = owner_.Get(mark);
       } while (mark && *who != me);
 
-      std::unique_lock<std::mutex> old_lock = Lock_(elem);
-      old_lock.lock();
+      std::mutex& mutex = Mutex_(elem);
+      mutex.lock();
 
       who = owner_.Get(mark);
 
       if ((!mark || *who != me) /* && old_locks == locks_ */) {
         return;
       }
-      old_lock.unlock();
+      mutex.unlock();
+      // Retry if resizing started mid-lock
     }
   }
 
   /**
    * Releases corresponding to the item lock
    */
-  void Release_(T elem) { Lock_(elem).unlock(); }
+  void Release_(T elem) { Mutex_(elem).unlock(); }
 
   /**
    * Waits for all locks to be unlocked
@@ -155,20 +155,19 @@ class HashSetRefinable : public HashSetBase<T> {
     size_t old_table_size = table_size_.load();
     size_t new_table_size = old_table_size * 2;
     // bool mark = false;
-    std::thread::id me = std::this_thread::get_id();
+    thread_local std::thread::id me = std::this_thread::get_id();
 
     if (owner_.CompareAndSet(nullptr, &me, false, true)) {
-      if (table_size_.load() !=
-          old_table_size) {  // someone already resized, just return
-        owner_.Set(nullptr, false);
+      if (table_size_.load() != old_table_size) {
+        // someone already resized, just return
         return;
       }
 
+      // Wait until all bucket locks are released
       Quiesce_();
 
       std::vector<std::vector<T>> old_table = table_;
       table_ = std::vector<std::vector<T>>(new_table_size);
-
       mutexes_ = std::vector<std::mutex>(new_table_size);
 
       for (auto& bucket : old_table) {
@@ -179,9 +178,9 @@ class HashSetRefinable : public HashSetBase<T> {
       }
 
       table_size_.store(new_table_size);
-    }
 
-    owner_.Set(nullptr, false);
+      owner_.Set(nullptr, false);
+    }
   }
 };
 
