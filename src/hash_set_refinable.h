@@ -31,7 +31,7 @@ static void busy_wait() {
 
 class SpinSharedLock {
  public:
-  void lock() {
+  void lock() noexcept {
     int v = UNLOCKED;
     while (
         !latch_.compare_exchange_weak(v, W_LOCKED, std::memory_order_acquire)) {
@@ -40,9 +40,9 @@ class SpinSharedLock {
     }
   }
 
-  void unlock() { latch_.store(UNLOCKED, std::memory_order_release); }
+  void unlock() noexcept { latch_.store(UNLOCKED, std::memory_order_release); }
 
-  void lock_shared() {
+  void lock_shared() noexcept {
     int v = latch_.load();
     while (v < UNLOCKED || !latch_.compare_exchange_weak(
                                v, v + R_LOCKED, std::memory_order_acquire)) {
@@ -51,7 +51,13 @@ class SpinSharedLock {
     }
   }
 
-  void unlock_shared() {
+  bool try_lock_shared() noexcept {
+    int v = latch_.load();
+    return v >= UNLOCKED && latch_.compare_exchange_weak(
+                                v, v + R_LOCKED, std::memory_order_acquire);
+  }
+
+  void unlock_shared() noexcept {
     latch_.fetch_sub(R_LOCKED, std::memory_order_release);
   }
 
@@ -60,71 +66,6 @@ class SpinSharedLock {
   static constexpr int W_LOCKED = -1;
   static constexpr int R_LOCKED = 1;
   std::atomic_int latch_{UNLOCKED};
-};
-
-struct tas_lock {
-  std::atomic<bool> lock_ = {false};
-
-  void lock() { while (lock_.exchange(true, std::memory_order_acquire)); }
-
-  void unlock() { lock_.store(false, std::memory_order_release); }
-};
-
-struct tas_shared_lock {
-  std::atomic<bool> lock_ = {false};
-  static constexpr int UNLOCKED = 0;
-  static constexpr int W_LOCKED = -1;
-  static constexpr int R_LOCKED = 1;
-  std::atomic_int latch_{UNLOCKED};
-
-  void lock() {
-    // while put(locked) & was(locked) {}
-    while (latch_.exchange(W_LOCKED, std::memory_order_acquire) <
-           UNLOCKED);  // equivalent to `== W_LOCKED`
-  }
-
-  void unlock() { latch_.store(UNLOCKED, std::memory_order_release); }
-
-  void lock_shared() {
-    int v = latch_.load();
-    while (v < UNLOCKED || !latch_.compare_exchange_weak(
-                               v, v + R_LOCKED, std::memory_order_acquire)) {
-      v = latch_.load();
-      busy_wait();
-    }
-  }
-
-  void unlock_shared() {
-    latch_.fetch_sub(R_LOCKED, std::memory_order_release);
-  }
-};
-
-struct ttas_lock {
-  std::atomic<bool> lock_ = {0};
-
-  void lock() noexcept {
-    for (;;) {
-      // Optimistically assume the lock is free on the first try
-      if (!lock_.exchange(true, std::memory_order_acquire)) {
-        return;
-      }
-      // Wait for lock to be released without generating cache misses
-      while (lock_.load(std::memory_order_relaxed)) {
-        // Issue X86 PAUSE or ARM YIELD instruction to reduce contention between
-        // hyper-threads
-        busy_wait();
-      }
-    }
-  }
-
-  bool try_lock() noexcept {
-    // First do a relaxed load to check if lock is free in order to prevent
-    // unnecessary cache misses if someone does while(!try_lock())
-    return !lock_.load(std::memory_order_relaxed) &&
-           !lock_.exchange(true, std::memory_order_acquire);
-  }
-
-  void unlock() noexcept { lock_.store(false, std::memory_order_release); }
 };
 
 template <typename T>
@@ -205,7 +146,7 @@ class HashSetRefinable : public HashSetBase<T> {
   std::deque<std::mutex> mutexes_;
   std::atomic<size_t> mutexes_size_;  // cached version of `mutexes_.size()`
   std::atomic<bool> resizing_;        // are we resizing or not
-  std::shared_mutex resize_lock_;
+  SpinSharedLock resize_lock_;
 
   /**
    * Returns the bucket associated with the element.
@@ -225,32 +166,11 @@ class HashSetRefinable : public HashSetBase<T> {
       auto old_mutexes_size = mutexes_size_.load();
       auto i = hasher_(elem) % old_mutexes_size;
 
-      // std::shared_mutex: 48-5700 ms
-      if (!resize_lock_.try_lock_shared())
-        continue;  // prevent race w/ `mutexes_.resize()`
+      if (!resize_lock_
+               .try_lock_shared())  // prevent race w/ `mutexes_.resize()`
+        continue;
       auto& mutex = mutexes_[i];
       resize_lock_.unlock_shared();
-
-      // // std::shared_mutex: 5000+ ms
-      // resize_lock_.lock_shared();  // prevent race w/ `mutexes_.resize()`
-      // auto& mutex = mutexes_[i];
-      // resize_lock_.unlock_shared();
-
-      // // SpinSharedLock: 24-2600 ms
-      // resize_lock_.lock_shared();  // prevent race w/ `mutexes_.resize()`
-      // auto& mutex = mutexes_[i];
-      // resize_lock_.unlock_shared();
-
-      // // TTAS lock: 30-4200 ms
-      // if (!resize_lock_.try_lock())
-      //   continue;  // prevent race w/ `mutexes_.resize()`
-      // auto& mutex = mutexes_[i];
-      // resize_lock_.unlock();
-
-      // // TTAS lock: 28-3000 ms
-      // resize_lock_.lock();  // prevent race w/ `mutexes_.resize()`
-      // auto& mutex = mutexes_[i];
-      // resize_lock_.unlock();
 
       mutex.lock();
 
