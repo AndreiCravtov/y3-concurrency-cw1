@@ -161,7 +161,8 @@ class HashSetRefinable : public HashSetBase<T> {
 
     if (is_resizing_.compare_exchange_strong(expected, desired)) {
       if (table_size_.load() != old_table_size) {
-        // someone already resized, just return
+        // someone already successfully resized, just return
+        is_resizing_.store(false);
         return;
       }
 
