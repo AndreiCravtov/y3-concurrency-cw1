@@ -37,6 +37,7 @@ class HashSetRefinable : public HashSetBase<T> {
         table_size_(capacity),
         set_size_(0),
         mutexes_(capacity),
+        mutexes_size_(capacity),
         resizing_(false) {
     assert(capacity > 0);
   }
@@ -104,7 +105,8 @@ class HashSetRefinable : public HashSetBase<T> {
   std::atomic<size_t> set_size_;  // tracks the number of elements in the table
   std::hash<T> hasher_;
   std::deque<std::mutex> mutexes_;
-  std::atomic<bool> resizing_;  // are we resizing or not
+  std::atomic<size_t> mutexes_size_;  // cached version of `mutexes_.size()`
+  std::atomic<bool> resizing_;        // are we resizing or not
 
   /**
    * Returns the bucket associated with the element.
@@ -121,12 +123,12 @@ class HashSetRefinable : public HashSetBase<T> {
       } while (resizing_.load());
 
       // grab old value of mutex sizes & lock down
-      auto old_mutexes_size = mutexes_.size();
+      auto old_mutexes_size = mutexes_size_.load();
       auto& mutex = mutexes_[hasher_(elem) % old_mutexes_size];
       mutex.lock();
 
       // haven't resized & not currently resizing -> succeed
-      if (!resizing_.load() && old_mutexes_size == mutexes_.size()) {
+      if (!resizing_.load() && old_mutexes_size == mutexes_size_.load()) {
         return;
       } else {
         mutex.unlock();
@@ -134,7 +136,9 @@ class HashSetRefinable : public HashSetBase<T> {
     }
   }
 
-  void Release_(T elem) { mutexes_[hasher_(elem) % mutexes_.size()].unlock(); }
+  void Release_(T elem) {
+    mutexes_[hasher_(elem) % mutexes_size_.load()].unlock();
+  }
 
   [[nodiscard]] bool Policy_() const {
     return set_size_.load() / table_size_.load() > 4;
@@ -154,6 +158,7 @@ class HashSetRefinable : public HashSetBase<T> {
       // wait for all locks to be released & expand mutexes to new capacity
       Quiesce_();
       mutexes_.resize(new_capacity);
+      mutexes_size_.store(new_capacity);
 
       // create a new empty table with double the bucket count
       // and rehash all elements into it from old table
