@@ -29,6 +29,39 @@ static void busy_wait() {
 #endif
 }
 
+class SpinSharedLock {
+ public:
+  void lock() {
+    int v = UNLOCKED;
+    while (
+        !latch_.compare_exchange_weak(v, W_LOCKED, std::memory_order_acquire)) {
+      v = UNLOCKED;
+      busy_wait();
+    }
+  }
+
+  void unlock() { latch_.store(UNLOCKED, std::memory_order_release); }
+
+  void lock_shared() {
+    int v = latch_.load();
+    while (v < UNLOCKED || !latch_.compare_exchange_weak(
+                               v, v + R_LOCKED, std::memory_order_acquire)) {
+      v = latch_.load();
+      busy_wait();
+    }
+  }
+
+  void unlock_shared() {
+    latch_.fetch_sub(R_LOCKED, std::memory_order_release);
+  }
+
+ private:
+  static constexpr int UNLOCKED = 0;
+  static constexpr int W_LOCKED = -1;
+  static constexpr int R_LOCKED = 1;
+  std::atomic_int latch_{UNLOCKED};
+};
+
 template <typename T>
 class HashSetRefinable : public HashSetBase<T> {
  public:
@@ -107,6 +140,7 @@ class HashSetRefinable : public HashSetBase<T> {
   std::deque<std::mutex> mutexes_;
   std::atomic<size_t> mutexes_size_;  // cached version of `mutexes_.size()`
   std::atomic<bool> resizing_;        // are we resizing or not
+  SpinSharedLock resize_lock_;
 
   /**
    * Returns the bucket associated with the element.
@@ -124,7 +158,12 @@ class HashSetRefinable : public HashSetBase<T> {
 
       // grab old value of mutex sizes & lock down
       auto old_mutexes_size = mutexes_size_.load();
-      auto& mutex = mutexes_[hasher_(elem) % old_mutexes_size];
+      auto i = hasher_(elem) % old_mutexes_size;
+
+      resize_lock_.lock_shared();  // prevent race w/ `mutexes_.resize()`
+      auto& mutex = mutexes_[i];
+      resize_lock_.unlock_shared();
+
       mutex.lock();
 
       // haven't resized & not currently resizing -> succeed
@@ -157,7 +196,10 @@ class HashSetRefinable : public HashSetBase<T> {
 
       // wait for all locks to be released & expand mutexes to new capacity
       Quiesce_();
+      resize_lock_.lock();  // prevent races w/ `mutexes_[i]`
       mutexes_.resize(new_capacity);
+      resize_lock_.unlock();
+
       mutexes_size_.store(new_capacity);
 
       // create a new empty table with double the bucket count
