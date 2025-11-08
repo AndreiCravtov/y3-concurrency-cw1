@@ -70,6 +70,35 @@ struct tas_lock {
   void unlock() { lock_.store(false, std::memory_order_release); }
 };
 
+struct tas_shared_lock {
+  std::atomic<bool> lock_ = {false};
+  static constexpr int UNLOCKED = 0;
+  static constexpr int W_LOCKED = -1;
+  static constexpr int R_LOCKED = 1;
+  std::atomic_int latch_{UNLOCKED};
+
+  void lock() {
+    // while put(locked) & was(locked) {}
+    while (latch_.exchange(W_LOCKED, std::memory_order_acquire) <
+           UNLOCKED);  // equivalent to `== W_LOCKED`
+  }
+
+  void unlock() { latch_.store(UNLOCKED, std::memory_order_release); }
+
+  void lock_shared() {
+    int v = latch_.load();
+    while (v < UNLOCKED || !latch_.compare_exchange_weak(
+                               v, v + R_LOCKED, std::memory_order_acquire)) {
+      v = latch_.load();
+      busy_wait();
+    }
+  }
+
+  void unlock_shared() {
+    latch_.fetch_sub(R_LOCKED, std::memory_order_release);
+  }
+};
+
 struct ttas_lock {
   std::atomic<bool> lock_ = {0};
 
@@ -176,7 +205,7 @@ class HashSetRefinable : public HashSetBase<T> {
   std::deque<std::mutex> mutexes_;
   std::atomic<size_t> mutexes_size_;  // cached version of `mutexes_.size()`
   std::atomic<bool> resizing_;        // are we resizing or not
-  ttas_lock resize_lock_;
+  std::shared_mutex resize_lock_;
 
   /**
    * Returns the bucket associated with the element.
@@ -196,9 +225,32 @@ class HashSetRefinable : public HashSetBase<T> {
       auto old_mutexes_size = mutexes_size_.load();
       auto i = hasher_(elem) % old_mutexes_size;
 
-      resize_lock_.lock();  // prevent race w/ `mutexes_.resize()`
+      // std::shared_mutex: 48-5700 ms
+      if (!resize_lock_.try_lock_shared())
+        continue;  // prevent race w/ `mutexes_.resize()`
       auto& mutex = mutexes_[i];
-      resize_lock_.unlock();
+      resize_lock_.unlock_shared();
+
+      // // std::shared_mutex: 5000+ ms
+      // resize_lock_.lock_shared();  // prevent race w/ `mutexes_.resize()`
+      // auto& mutex = mutexes_[i];
+      // resize_lock_.unlock_shared();
+
+      // // SpinSharedLock: 24-2600 ms
+      // resize_lock_.lock_shared();  // prevent race w/ `mutexes_.resize()`
+      // auto& mutex = mutexes_[i];
+      // resize_lock_.unlock_shared();
+
+      // // TTAS lock: 30-4200 ms
+      // if (!resize_lock_.try_lock())
+      //   continue;  // prevent race w/ `mutexes_.resize()`
+      // auto& mutex = mutexes_[i];
+      // resize_lock_.unlock();
+
+      // // TTAS lock: 28-3000 ms
+      // resize_lock_.lock();  // prevent race w/ `mutexes_.resize()`
+      // auto& mutex = mutexes_[i];
+      // resize_lock_.unlock();
 
       mutex.lock();
 
